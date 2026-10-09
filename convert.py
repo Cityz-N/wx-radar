@@ -214,6 +214,11 @@ def main():
     d.text((8, 8), f"Meteo-France rain mosaic {t_end:%Y-%m-%d %H:%MZ}  (grey = no radar data, grid = 1 degree)",
            fill=(255, 255, 255))
     img.save(os.path.join(OUT, "preview.png"))
+    with open(os.path.join(OUT, "index.html"), "w", encoding="utf-8") as f:
+        f.write("<!doctype html><meta charset=utf-8><title>Radar frame</title>"
+                "<body style='background:#111;color:#ddd;font-family:sans-serif'>"
+                f"<p>Latest frame: {t_end:%Y-%m-%d %H:%M} UTC. Source: M&eacute;t&eacute;o-France.</p>"
+                "<img src='preview.png' style='max-width:100%'></body>")
     log(f"done in {time.time() - t_start:.1f} s")
 
 
