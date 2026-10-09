@@ -1,16 +1,13 @@
 """
-Discovery script - shows what Meteo-France radar files look like.
-It prints NO secrets (the API key is read from the GitHub secret MF_API_KEY and is
-only sent in the request header).
+Discovery script, round 2: look closely at the 500 m rainfall (LAME_D_EAU) HDF5 mosaic.
+Prints NO secrets (the API key comes from the GitHub secret MF_API_KEY).
 """
-import gzip
-import io
 import os
 import sys
-import tarfile
+import time
 import traceback
-import zipfile
 
+import numpy as np
 import requests
 
 BASE = "https://public-api.meteofrance.fr/public/DPRadar/v1"
@@ -25,166 +22,87 @@ def title(t):
     print("\n" + "=" * 70 + "\n" + t + "\n" + "=" * 70, flush=True)
 
 
-def call(path, params=None):
-    url = BASE + path
-    print("GET", url, "params=", params, flush=True)
-    r = requests.get(url, headers=HEAD, params=params, timeout=180)
-    print("status:", r.status_code)
-    for h in ("content-type", "content-disposition", "content-length", "last-modified", "date"):
-        if h in r.headers:
-            print(h + ":", r.headers[h])
-    return r
-
-
-def show_text(r, limit=3500):
-    try:
-        txt = r.text
-    except Exception:
-        txt = repr(r.content[:limit])
-    print(txt[:limit] + ("\n...[cut]" if len(txt) > limit else ""))
-
-
-def analyse_bytes(data, label):
-    print(f"\n--- analysing {label}: {len(data)} bytes")
-    print("first 16 bytes (hex):", data[:16].hex(" "))
-    print("first 16 bytes (text):", repr(data[:16]))
-    if data[:2] == b"\x1f\x8b":
-        print("-> gzip, decompressing")
-        analyse_bytes(gzip.decompress(data), label + " (ungzipped)")
-    elif data[:4] == b"PK\x03\x04":
-        print("-> zip archive")
-        z = zipfile.ZipFile(io.BytesIO(data))
-        for n in z.namelist()[:40]:
-            print("   ", n)
-        for n in z.namelist()[:2]:
-            analyse_bytes(z.read(n), label + ":" + n)
-    elif data[257:262] == b"ustar":
-        print("-> tar archive")
-        t = tarfile.open(fileobj=io.BytesIO(data))
-        names = t.getnames()
-        for n in names[:40]:
-            print("   ", n)
-        for m in t.getmembers()[:2]:
-            if m.isfile():
-                analyse_bytes(t.extractfile(m).read(), label + ":" + m.name)
-    elif data[:4] == b"BUFR":
-        print("-> BUFR file")
-        analyse_bufr(data)
-    elif data[:4] == b"\x89HDF":
-        print("-> HDF5 file")
-        analyse_hdf5(data)
-    elif data[:4] == b"GRIB":
-        print("-> GRIB file")
-    elif data[:4] in (b"II*\x00", b"MM\x00*"):
-        print("-> TIFF / GeoTIFF file")
-    elif data[:8] == b"\x89PNG\r\n\x1a\n":
-        print("-> PNG image")
-    else:
-        print("-> unknown format; first 300 bytes:", repr(data[:300]))
-
-
-def analyse_bufr(data):
-    try:
-        import numpy as np
-        from eccodes import (codes_bufr_new_from_file, codes_set, codes_bufr_keys_iterator_new,
-                             codes_bufr_keys_iterator_next, codes_bufr_keys_iterator_get_name,
-                             codes_get_size, codes_get, codes_get_array, codes_release)
-    except Exception:
-        print("eccodes not available:")
-        traceback.print_exc()
-        return
-    path = "sample.bufr"
-    with open(path, "wb") as f:
-        f.write(data)
-    with open(path, "rb") as f:
-        n = 0
-        while True:
-            h = codes_bufr_new_from_file(f)
-            if h is None:
-                break
-            n += 1
-            print(f"\nBUFR message {n}")
-            try:
-                codes_set(h, "unpack", 1)
-                it = codes_bufr_keys_iterator_new(h)
-                count = 0
-                while codes_bufr_keys_iterator_next(it) and count < 150:
-                    k = codes_bufr_keys_iterator_get_name(it)
-                    count += 1
-                    try:
-                        size = codes_get_size(h, k)
-                        if size > 1:
-                            arr = np.array(codes_get_array(h, k))
-                            try:
-                                print(f"  {k}: array size={size} min={arr.min()} max={arr.max()} first={arr[:5].tolist()}")
-                            except Exception:
-                                print(f"  {k}: array size={size} first={arr[:5].tolist()}")
-                        else:
-                            print(f"  {k}: {codes_get(h, k)}")
-                    except Exception as e:
-                        print(f"  {k}: <unreadable: {e}>")
-            except Exception:
-                traceback.print_exc()
-            codes_release(h)
-            if n >= 3:
-                print("(more messages not shown)")
-                break
-    if n == 0:
-        print("eccodes could not find any BUFR message in this file")
-
-
-def analyse_hdf5(data):
-    try:
-        import h5py
-    except Exception:
-        print("h5py not available:")
-        traceback.print_exc()
-        return
-    with open("sample.h5", "wb") as f:
-        f.write(data)
-    with h5py.File("sample.h5", "r") as f:
-        print("root attrs:", dict(f.attrs))
-        lines = []
-
-        def visit(name, obj):
-            if isinstance(obj, h5py.Dataset):
-                lines.append(f"DATASET {name} shape={obj.shape} dtype={obj.dtype} attrs={dict(obj.attrs)}")
-            else:
-                lines.append(f"GROUP   {name} attrs={dict(obj.attrs)}")
-
-        f.visititems(visit)
-        for ln in lines[:80]:
-            print(ln[:600])
-        if len(lines) > 80:
-            print(f"... {len(lines) - 80} more entries")
+def fmt(attrs):
+    return {k: (v.decode() if isinstance(v, (bytes, np.bytes_)) else v) for k, v in dict(attrs).items()}
 
 
 def main():
-    title("A. What the API offers")
-    for p in ("/mosaiques/METROPOLE/observations/REFLECTIVITE",
-              "/mosaiques/METROPOLE/observations/LAME_D_EAU"):
-        try:
-            show_text(call(p))
-        except Exception:
-            traceback.print_exc()
-        print()
+    import h5py
 
-    # The server asked for a "maille" (grid size in metres). Try the likely values.
-    for obs in ("REFLECTIVITE", "LAME_D_EAU"):
-        title(f"B. Latest mosaic for METROPOLE: {obs}")
-        for maille in (1000, 500):
-            try:
-                r = call(f"/mosaiques/METROPOLE/observations/{obs}/produit", params={"maille": maille})
-                if r.status_code == 200:
-                    analyse_bytes(r.content, f"{obs} maille={maille}")
-                else:
-                    print("The request failed; reply from the server:")
-                    show_text(r, 1500)
-            except Exception:
-                traceback.print_exc()
-            print()
+    title("1. Download")
+    t0 = time.time()
+    r = requests.get(BASE + "/mosaiques/METROPOLE/observations/LAME_D_EAU/produit",
+                     headers=HEAD, params={"maille": 500}, timeout=180)
+    print("status:", r.status_code, " bytes:", len(r.content), " seconds:", round(time.time() - t0, 1))
+    if r.status_code != 200:
+        print(r.text[:1500])
+        return
+    with open("sample.h5", "wb") as f:
+        f.write(r.content)
+
+    with h5py.File("sample.h5", "r") as f:
+        title("2. Structure (without the per-radar details)")
+        print("top level:", list(f.keys()))
+        print("root attrs:", fmt(f.attrs))
+
+        def visit(name, obj):
+            if name.startswith("how/node"):
+                return
+            kind = "DATASET" if isinstance(obj, h5py.Dataset) else "GROUP"
+            extra = f" shape={obj.shape} dtype={obj.dtype}" if kind == "DATASET" else ""
+            print(f"{kind} {name}{extra} attrs={fmt(obj.attrs)}"[:900])
+
+        f.visititems(visit)
+
+        title("3. Georeferencing (the important part)")
+        for name in ("where", "what", "dataset1/where", "dataset1/what", "dataset1/data1/what"):
+            if name in f:
+                print(name, "->", fmt(f[name].attrs))
+            else:
+                print(name, "-> not present")
+        if "how" in f:
+            print("how (general attrs) ->", {k: v for k, v in fmt(f["how"].attrs).items() if k not in ("nodes", "missing_nodes")})
+
+        title("4. The numbers")
+        d = f["dataset1/data1/data"][...]
+        w = f["dataset1/data1/what"].attrs
+        gain, offset = float(w["gain"]), float(w["offset"])
+        nodata, undetect = float(w["nodata"]), float(w["undetect"])
+        print("shape:", d.shape, "dtype:", d.dtype, "gain:", gain, "offset:", offset)
+        is_nodata = d == nodata
+        is_und = d == undetect
+        valid = ~(is_nodata | is_und)
+        total = d.size
+        print(f"nodata cells (outside radar coverage): {is_nodata.sum()} ({100 * is_nodata.mean():.1f}%)")
+        print(f"undetect cells (no rain): {is_und.sum()} ({100 * is_und.mean():.1f}%)")
+        print(f"cells with a measured value: {valid.sum()} ({100 * valid.mean():.1f}%)")
+        vals = d[valid].astype(np.float64) * gain + offset      # mm accumulated over 5 min
+        if vals.size:
+            print("5-min accumulation in mm: min", vals.min(), "max", vals.max())
+            for p in (50, 90, 99, 99.9):
+                print(f"  percentile {p}: {np.percentile(vals, p):.3f} mm")
+            rate = vals * 12.0                                    # mm per hour
+            print("cells by rain rate (mm/h):")
+            for thr in (0.1, 1, 5, 10, 20, 40, 80):
+                print(f"  >= {thr:>5} mm/h : {(rate >= thr).sum()}")
+        # where is the data? bounding box of the measured cells (row/col)
+        rows = np.where(valid.any(axis=1))[0]
+        cols = np.where(valid.any(axis=0))[0]
+        if rows.size and cols.size:
+            print("measured cells span rows", rows.min(), "-", rows.max(), " cols", cols.min(), "-", cols.max())
+        print("corner values (top-left, top-right, bottom-left, bottom-right):",
+              d[0, 0], d[0, -1], d[-1, 0], d[-1, -1])
+
+        q = "dataset1/data1/quality1/data"
+        if q in f:
+            qd = f[q][...]
+            qw = f["dataset1/data1/quality1/what"].attrs
+            print("quality layer: min", qd.min(), "max", qd.max(), "gain", float(qw["gain"]))
 
     print("\nDONE")
 
 
-main()
+try:
+    main()
+except Exception:
+    traceback.print_exc()
