@@ -1,0 +1,28 @@
+name: Build radar frame (test)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tools
+        run: pip install requests numpy h5py pillow pyproj
+
+      - name: Convert the latest Meteo-France mosaic
+        env:
+          MF_API_KEY: ${{ secrets.MF_API_KEY }}
+        run: python convert.py
+
+      - name: Keep the results
+        uses: actions/upload-artifact@v4
+        with:
+          name: radar-test
+          path: out/
