@@ -161,24 +161,28 @@ def analyse_hdf5(data):
 
 def main():
     title("A. What the API offers")
-    for p in ("/mosaiques", "/mosaiques/METROPOLE", "/mosaiques/METROPOLE/observations"):
+    for p in ("/mosaiques/METROPOLE/observations/REFLECTIVITE",
+              "/mosaiques/METROPOLE/observations/LAME_D_EAU"):
         try:
             show_text(call(p))
         except Exception:
             traceback.print_exc()
         print()
 
+    # The server asked for a "maille" (grid size in metres). Try the likely values.
     for obs in ("REFLECTIVITE", "LAME_D_EAU"):
         title(f"B. Latest mosaic for METROPOLE: {obs}")
-        try:
-            r = call(f"/mosaiques/METROPOLE/observations/{obs}/produit")
-            if r.status_code == 200:
-                analyse_bytes(r.content, obs)
-            else:
-                print("The request failed; reply from the server:")
-                show_text(r)
-        except Exception:
-            traceback.print_exc()
+        for maille in (1000, 500):
+            try:
+                r = call(f"/mosaiques/METROPOLE/observations/{obs}/produit", params={"maille": maille})
+                if r.status_code == 200:
+                    analyse_bytes(r.content, f"{obs} maille={maille}")
+                else:
+                    print("The request failed; reply from the server:")
+                    show_text(r, 1500)
+            except Exception:
+                traceback.print_exc()
+            print()
 
     print("\nDONE")
 
