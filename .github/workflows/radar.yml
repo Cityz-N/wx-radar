@@ -1,17 +1,23 @@
 name: Publish radar
 
+# How it runs: every run converts and publishes the newest radar frame, and a second job
+# in the same run waits ~5 minutes and then starts the next run ("chain").
+# The 15-minute schedule below is only a safety net that restarts the chain if it ever stops.
+# To stop everything: Actions tab > Publish radar > "..." menu > Disable workflow.
+
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write
 
 concurrency:
-  group: pages
+  group: radar-chain
   cancel-in-progress: false
 
 jobs:
@@ -44,3 +50,27 @@ jobs:
 
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  next:
+    # Runs in parallel with "publish" and does not depend on it, so the chain
+    # continues even if a conversion fails.
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Wait, then start the next run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref_name }}
+        run: |
+          sleep 285
+          for i in 1 2 3 4 5; do
+            if gh workflow run radar.yml --repo "$REPO" --ref "$REF"; then
+              echo "next run requested"
+              exit 0
+            fi
+            echo "attempt $i failed, retrying"
+            sleep 10
+          done
+          echo "could not request the next run"
+          exit 1
