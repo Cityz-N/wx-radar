@@ -58,19 +58,37 @@ def py_to_lat(py, z):
 
 # ---------------------------------------------------------------- download
 def download(path="sample.h5"):
+    """Download the latest mosaic. Retries a few times because the server is sometimes
+    unreachable for a short while (we saw 'connection refused' from GitHub's machines)."""
     if not KEY:
         log("ERROR: the secret MF_API_KEY is missing or empty.")
         sys.exit(1)
-    t0 = time.time()
-    r = requests.get(BASE + "/mosaiques/METROPOLE/observations/LAME_D_EAU/produit",
-                     headers={"apikey": KEY, "accept": "*/*"}, params={"maille": 500}, timeout=180)
-    log(f"download: status {r.status_code}, {len(r.content)} bytes, {time.time() - t0:.1f} s")
-    if r.status_code != 200:
-        log(r.text[:1000])
-        sys.exit(1)
-    with open(path, "wb") as f:
-        f.write(r.content)
-    return path
+    url = BASE + "/mosaiques/METROPOLE/observations/LAME_D_EAU/produit"
+    last = ""
+    for attempt in range(1, 6):
+        t0 = time.time()
+        try:
+            r = requests.get(url, headers={"apikey": KEY, "accept": "*/*"},
+                             params={"maille": 500}, timeout=(15, 90))
+        except requests.RequestException as e:
+            last = type(e).__name__
+            log(f"attempt {attempt}/5: network problem ({last}) after {time.time() - t0:.1f} s")
+        else:
+            log(f"attempt {attempt}/5: status {r.status_code}, {len(r.content)} bytes, {time.time() - t0:.1f} s")
+            if r.status_code == 200:
+                with open(path, "wb") as f:
+                    f.write(r.content)
+                return path
+            last = f"HTTP {r.status_code}"
+            log(r.text[:300])
+            if r.status_code in (401, 403):
+                log("The server refuses the key (expired or wrong). Generate a new key on the Meteo-France portal"
+                    " and update the MF_API_KEY secret.")
+                sys.exit(1)
+        if attempt < 5:
+            time.sleep(15 * attempt)
+    log(f"ERROR: could not download the mosaic ({last}).")
+    sys.exit(1)
 
 
 def txt(v):
