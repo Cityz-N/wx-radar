@@ -33,6 +33,12 @@ LAT_MIN, LAT_MAX = 41.0, 51.4                # same area as the plugin
 LON_MIN, LON_MAX = -5.6, 10.0
 OUT = "out"
 
+# "Publish only when Meteo-France has a new frame"
+PAGES_URL = os.environ.get("PAGES_URL", "").strip()          # your site, e.g. https://name.github.io/wx-radar/
+FORCE = os.environ.get("FORCE", "").strip().lower() == "true"  # publish even if nothing is new
+POLL_SECONDS = 20                                              # how often to ask Meteo-France if a new frame exists
+MAX_WAIT_SECONDS = int(os.environ.get("MAX_WAIT_SECONDS", "420"))
+
 
 def log(*a):
     print(*a, flush=True)
@@ -99,9 +105,90 @@ def parse_time(date, tm):
     return datetime.strptime(txt(date) + txt(tm), "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
 
 
+# ---------------------------------------------------------------- "is there a new frame?"
+def set_output(published):
+    """Tell the GitHub workflow whether there is something to publish."""
+    path = os.environ.get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a") as f:
+            f.write(f"published={'true' if published else 'false'}\n")
+
+
+def published_frame_time():
+    """Unix time of the frame currently shown on your site (0 if unknown)."""
+    if not PAGES_URL:
+        return 0
+    try:
+        url = PAGES_URL.rstrip("/") + f"/latest.json?t={int(time.time() * 1000)}"
+        r = requests.get(url, timeout=20, headers={"Cache-Control": "no-cache"})
+        if r.status_code == 200:
+            return int(r.json().get("frame_unix", 0))
+        log(f"published frame: site answered {r.status_code}")
+    except Exception as e:
+        log(f"published frame: could not read the site ({type(e).__name__})")
+    return 0
+
+
+def newest_frame_time():
+    """Unix time of the newest 500 m mosaic that Meteo-France offers right now (None if unknown)."""
+    r = requests.get(BASE + "/mosaiques/METROPOLE/observations/LAME_D_EAU",
+                     headers={"apikey": KEY, "accept": "application/json"}, timeout=(10, 30))
+    if r.status_code in (401, 403):
+        log("The server refuses the key (expired or wrong). Generate a new key on the Meteo-France portal"
+            " and update the MF_API_KEY secret.")
+        sys.exit(1)
+    r.raise_for_status()
+    best = None
+    for link in r.json().get("links", []):
+        vt = link.get("validity_time")
+        if vt and "maille=500" in link.get("href", ""):
+            best = vt
+    if best is None:
+        for link in r.json().get("links", []):
+            if link.get("validity_time"):
+                best = link["validity_time"]
+    if best is None:
+        return None
+    return int(datetime.strptime(best, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp())
+
+
+def wait_for_new_frame(published):
+    """Check every POLL_SECONDS whether Meteo-France has a frame newer than the published one.
+    Returns True as soon as there is one, False if none appears within MAX_WAIT_SECONDS."""
+    deadline = time.time() + MAX_WAIT_SECONDS
+    n = 0
+    while True:
+        n += 1
+        newest = None
+        try:
+            newest = newest_frame_time()
+        except SystemExit:
+            raise
+        except Exception as e:
+            log(f"check {n}: could not ask Meteo-France ({type(e).__name__})")
+        else:
+            def hhmm(t):
+                return datetime.fromtimestamp(t, timezone.utc).strftime("%H:%MZ") if t else "none"
+            log(f"check {n}: published {hhmm(published)}, Meteo-France newest {hhmm(newest)}")
+        if newest and newest > published:
+            return True
+        if time.time() + POLL_SECONDS > deadline:
+            return False
+        time.sleep(POLL_SECONDS)
+
+
 # ---------------------------------------------------------------- main conversion
 def main():
     t_start = time.time()
+    published = 0
+    if FORCE:
+        log("FORCE is on: publishing without waiting for a new frame")
+    else:
+        published = published_frame_time()
+        if not wait_for_new_frame(published):
+            log("No new Meteo-France frame appeared in time. Nothing to publish this time.")
+            set_output(False)
+            return
     path = download()
 
     with h5py.File(path, "r") as f:
@@ -118,6 +205,11 @@ def main():
         dw = f["dataset1/what"].attrs
         t_end = parse_time(dw["enddate"], dw["endtime"])
         t_begin = parse_time(dw["startdate"], dw["starttime"])
+
+    if not FORCE and int(t_end.timestamp()) <= published:
+        log("The downloaded frame is not newer than the published one. Nothing to publish.")
+        set_output(False)
+        return
 
     minutes = (t_end - t_begin).total_seconds() / 60.0
     if minutes <= 0:
@@ -237,6 +329,7 @@ def main():
                 "<body style='background:#111;color:#ddd;font-family:sans-serif'>"
                 f"<p>Latest frame: {t_end:%Y-%m-%d %H:%M} UTC. Source: M&eacute;t&eacute;o-France.</p>"
                 "<img src='preview.png' style='max-width:100%'></body>")
+    set_output(True)
     log(f"done in {time.time() - t_start:.1f} s")
 
 
