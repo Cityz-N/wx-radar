@@ -1,7 +1,8 @@
 name: Publish radar
 
-# How it runs: every run converts and publishes the newest radar frame, and a second job
-# in the same run waits ~5 minutes and then starts the next run ("chain").
+# How it runs: each run waits until Meteo-France offers a frame newer than the one on your
+# site, converts it and publishes it right away. When it is done, a second job starts the
+# next run ("chain"), which then waits for the following frame.
 # The 15-minute schedule below is only a safety net that restarts the chain if it ever stops.
 # To stop everything: Actions tab > Publish radar > "..." menu > Disable workflow.
 
@@ -9,6 +10,11 @@ on:
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Publish right now, even if there is no new frame"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -23,7 +29,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 14
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -37,33 +43,45 @@ jobs:
       - name: Install tools
         run: pip install requests numpy h5py pillow pyproj
 
-      - name: Convert the latest Meteo-France mosaic
+      - name: Wait for a new Meteo-France frame and convert it
+        id: convert
         env:
           MF_API_KEY: ${{ secrets.MF_API_KEY }}
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          FORCE: ${{ inputs.force }}
+          MAX_WAIT_SECONDS: "420"
         run: python convert.py
 
-      - uses: actions/configure-pages@v5
+      - name: Prepare the site
+        if: steps.convert.outputs.published == 'true'
+        uses: actions/configure-pages@v5
 
-      - uses: actions/upload-pages-artifact@v3
+      - name: Upload the site
+        if: steps.convert.outputs.published == 'true'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: out
 
-      - id: deployment
+      - name: Publish the site
+        id: deployment
+        if: steps.convert.outputs.published == 'true'
         uses: actions/deploy-pages@v4
 
   next:
-    # Runs in parallel with "publish" and does not depend on it, so the chain
-    # continues even if a conversion fails.
+    # Starts the next run once this one has finished publishing (or failed, or found nothing new),
+    # so that the chain never stops because of one bad run.
+    needs: publish
+    if: ${{ always() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
-      - name: Wait, then start the next run
+      - name: Short pause, then start the next run
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref_name }}
         run: |
-          sleep 285
+          sleep 45
           for i in 1 2 3 4 5; do
             if gh workflow run radar.yml --repo "$REPO" --ref "$REF"; then
               echo "next run requested"
